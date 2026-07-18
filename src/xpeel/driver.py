@@ -43,6 +43,13 @@ class XPeel:
             port; enables testing without hardware.
         baudrate: Serial baud rate (defaults to 9600).
         read_timeout: Per-read serial timeout in seconds.
+        peel_timeout: Deadline for a full peel cycle to reach ``*ready``.
+        query_timeout: Deadline for a quick query (e.g. tape remaining).
+        drain_idle_timeout: Startup drain stops after the line is quiet this long.
+        drain_max_time: Absolute cap on the startup drain.
+
+    The timeout arguments default to the module-level constants and exist mainly
+    so callers (and tests) can tune or shorten them.
     """
 
     def __init__(
@@ -52,10 +59,18 @@ class XPeel:
         connection: Optional[object] = None,
         baudrate: int = DEFAULT_BAUDRATE,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
+        peel_timeout: float = PEEL_TIMEOUT,
+        query_timeout: float = QUERY_TIMEOUT,
+        drain_idle_timeout: float = DRAIN_IDLE_TIMEOUT,
+        drain_max_time: float = DRAIN_MAX_TIME,
     ) -> None:
         if connection is None and port is None:
             raise ValueError("Provide either a 'port' to open or a 'connection'.")
         self._read_timeout = read_timeout
+        self._peel_timeout = peel_timeout
+        self._query_timeout = query_timeout
+        self._drain_idle_timeout = drain_idle_timeout
+        self._drain_max_time = drain_max_time
         # Unsolicited startup messages consumed during construction, kept for
         # inspection/debugging.
         self.startup_messages: List[str] = []
@@ -102,9 +117,9 @@ class XPeel:
         a device that has been idle sends nothing. We consume whatever is
         present (retaining a copy in ``startup_messages``) until either a
         terminal ``*ready`` is seen or the line has been quiet for
-        ``DRAIN_IDLE_TIMEOUT``, bounded by ``DRAIN_MAX_TIME``.
+        ``drain_idle_timeout``, bounded by ``drain_max_time``.
         """
-        hard_deadline = time.monotonic() + DRAIN_MAX_TIME
+        hard_deadline = time.monotonic() + self._drain_max_time
         last_activity = time.monotonic()
         while time.monotonic() < hard_deadline:
             line = self._read_message()
@@ -115,7 +130,7 @@ class XPeel:
                 if protocol.is_ready(line):
                     return
                 continue
-            if time.monotonic() - last_activity >= DRAIN_IDLE_TIMEOUT:
+            if time.monotonic() - last_activity >= self._drain_idle_timeout:
                 return
 
     def _run_command(
@@ -180,7 +195,7 @@ class XPeel:
                 f"got {adhere_time!r}."
             )
         _, ready = self._run_command(
-            f"xpeel:{param_set}{adhere_time}", ready_timeout=PEEL_TIMEOUT
+            f"xpeel:{param_set}{adhere_time}", ready_timeout=self._peel_timeout
         )
         self._raise_for_error_codes(ready)
         return ready
@@ -210,7 +225,9 @@ class XPeel:
         The trailing ``*ready`` error fields are intentionally ignored: for query
         commands they carry codes from the *previous* motion, not this query.
         """
-        data_lines, _ = self._run_command("tapeleft", ready_timeout=QUERY_TIMEOUT)
+        data_lines, _ = self._run_command(
+            "tapeleft", ready_timeout=self._query_timeout
+        )
         for line in data_lines:
             if protocol.is_tape(line):
                 return protocol.parse_tape(line)
