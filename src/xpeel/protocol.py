@@ -71,3 +71,39 @@ def parse_tape(line: str) -> Tuple[Optional[int], Optional[int]]:
     if supply_raw == TAPE_UNKNOWN and takeup_raw == TAPE_UNKNOWN:
         return None, None
     return supply_raw * TAPE_MULTIPLIER, takeup_raw * TAPE_MULTIPLIER
+
+
+# ``*ready:XX,XX,XX`` -- up to three error codes from the previous motion.
+_READY_RE = re.compile(r"^\*ready:(\d{2}),(\d{2}),(\d{2})$")
+
+# Error-code table (manual p.56). ``00`` means "no error".
+ERROR_CODES = {
+    0: "No error",
+    1: "Conveyor motor stalled",
+    2: "Elevator motor stalled",
+    3: "Take-up spool stalled",
+    4: "Seal not removed",
+    5: "Illegal command",
+    6: "No plate found (plate check enabled)",
+    7: "Out of tape, or tape broke",
+    8: "Parameters not saved",
+    9: "Stop button pressed while running",
+    10: "Seal sensor unplugged or broken",
+    20: "Less than 30 seals left on the supply roll",
+    21: "Room for less than 30 seals on the take-up spool",
+    51: "Emergency stop: power relay not settable (cover open or hardware fault)",
+    52: "Circuitry fault detected: remove power",
+}
+
+
+def parse_ready(line: str) -> Tuple[int, int, int]:
+    """Parse ``*ready:XX,XX,XX`` into its three integer error codes."""
+    match = _READY_RE.match(normalize(line))
+    if match is None:
+        raise XPeelProtocolError(f"Malformed ready response: {line!r}")
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def describe_error_code(code: int) -> str:
+    """Human-readable description for an error code, tolerant of unknown codes."""
+    return ERROR_CODES.get(code, f"Unknown error code {code:02d}")

@@ -9,7 +9,9 @@ import serial
 
 from xpeel import protocol
 from xpeel.exceptions import (
+    XPeelAckTimeoutError,
     XPeelConnectionError,
+    XPeelDeviceError,
     XPeelProtocolError,
     XPeelTimeoutError,
 )
@@ -50,7 +52,6 @@ class XPeel:
         connection: Optional[object] = None,
         baudrate: int = DEFAULT_BAUDRATE,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
-        drain_on_init: bool = True,
     ) -> None:
         if connection is None and port is None:
             raise ValueError("Provide either a 'port' to open or a 'connection'.")
@@ -62,8 +63,7 @@ class XPeel:
             self._conn = connection
         else:
             self._conn = self._open(port, baudrate, read_timeout)
-        if drain_on_init:
-            self._drain_unsolicited()
+        self._drain_unsolicited()
 
     @staticmethod
     def _open(port: str, baudrate: int, read_timeout: float):
@@ -99,9 +99,10 @@ class XPeel:
         """Consume any unsolicited messages already on the line before commands.
 
         On power-up the device broadcasts ``*poweron``/``*homing``/``*ready``;
-        a device that has been idle sends nothing. We read and discard whatever
-        is present until either a terminal ``*ready`` is seen or the line has
-        been quiet for ``DRAIN_IDLE_TIMEOUT``, bounded by ``DRAIN_MAX_TIME``.
+        a device that has been idle sends nothing. We consume whatever is
+        present (retaining a copy in ``startup_messages``) until either a
+        terminal ``*ready`` is seen or the line has been quiet for
+        ``DRAIN_IDLE_TIMEOUT``, bounded by ``DRAIN_MAX_TIME``.
         """
         hard_deadline = time.monotonic() + DRAIN_MAX_TIME
         last_activity = time.monotonic()
@@ -124,12 +125,16 @@ class XPeel:
 
         Returns ``(data_lines, ready_line)`` where ``data_lines`` are any
         intermediate payload lines (e.g. ``*tape:...``) received before ready;
-        ``*ack`` is treated as a receipt only. Raises
-        :class:`XPeelTimeoutError` if no ``*ready`` arrives in time.
+        ``*ack`` is treated as a receipt only.
+
+        Raises :class:`XPeelAckTimeoutError` if an ``*ack`` was seen but no
+        ``*ready`` followed in time, and :class:`XPeelTimeoutError` if nothing
+        usable arrived at all.
         """
         self._conn.write(protocol.build_command(body))
         deadline = time.monotonic() + ready_timeout
         data_lines: List[str] = []
+        saw_ack = False
         while time.monotonic() < deadline:
             line = self._read_message()
             if not line:
@@ -137,10 +142,16 @@ class XPeel:
             if protocol.is_ready(line):
                 return data_lines, line
             if protocol.is_ack(line):
+                saw_ack = True
                 continue
             data_lines.append(line)
+        if saw_ack:
+            raise XPeelAckTimeoutError(
+                f"Received *ack but no *ready for command '*{body}' "
+                f"within {ready_timeout}s."
+            )
         raise XPeelTimeoutError(
-            f"No *ready response for command '*{body}' within {ready_timeout}s."
+            f"No response for command '*{body}' within {ready_timeout}s."
         )
 
     # -- public commands ---------------------------------------------------
@@ -155,7 +166,8 @@ class XPeel:
                 (1=2.5s, 2=5s, 3=7.5s, 4=10s).
 
         Defaults produce ``*xpeel:41``. Raises ``ValueError`` for out-of-range
-        parameters.
+        parameters and :class:`XPeelDeviceError` if the device reports a nonzero
+        error code (e.g. seal not removed, out of tape).
         """
         if param_set not in protocol.PARAM_SETS:
             raise ValueError(
@@ -170,7 +182,23 @@ class XPeel:
         _, ready = self._run_command(
             f"xpeel:{param_set}{adhere_time}", ready_timeout=PEEL_TIMEOUT
         )
+        self._raise_for_error_codes(ready)
         return ready
+
+    @staticmethod
+    def _raise_for_error_codes(ready_line: str) -> None:
+        """Raise :class:`XPeelDeviceError` if a motion ``*ready`` reports errors.
+
+        Only meaningful for motion commands: for query commands the ``*ready``
+        error fields carry codes from the *previous* motion, so callers of those
+        commands must not use this.
+        """
+        codes = protocol.parse_ready(ready_line)
+        failed = [code for code in codes if code != 0]
+        if failed:
+            raise XPeelDeviceError(
+                failed, [protocol.describe_error_code(code) for code in failed]
+            )
 
     def tape_left(self) -> Tuple[Optional[int], Optional[int]]:
         """Report remaining tape as (supply, take-up) counts in *deseals*.
@@ -178,6 +206,9 @@ class XPeel:
         ``supply`` is the peel operations left on the supply spool; ``take-up``
         is the room left on the collection spool. Returns ``(None, None)`` when
         the device reports the unknown state (``99,99``, before the first peel).
+
+        The trailing ``*ready`` error fields are intentionally ignored: for query
+        commands they carry codes from the *previous* motion, not this query.
         """
         data_lines, _ = self._run_command("tapeleft", ready_timeout=QUERY_TIMEOUT)
         for line in data_lines:

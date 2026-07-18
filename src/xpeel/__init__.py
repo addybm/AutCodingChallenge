@@ -2,7 +2,9 @@
 
 from xpeel.driver import XPeel
 from xpeel.exceptions import (
+    XPeelAckTimeoutError,
     XPeelConnectionError,
+    XPeelDeviceError,
     XPeelError,
     XPeelProtocolError,
     XPeelTimeoutError,
@@ -13,7 +15,9 @@ __all__ = [
     "XPeelError",
     "XPeelConnectionError",
     "XPeelTimeoutError",
+    "XPeelAckTimeoutError",
     "XPeelProtocolError",
+    "XPeelDeviceError",
 ]
 
 __version__ = "0.1.0"
