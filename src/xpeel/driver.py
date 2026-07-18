@@ -71,6 +71,10 @@ class XPeel:
         self._query_timeout = query_timeout
         self._drain_idle_timeout = drain_idle_timeout
         self._drain_max_time = drain_max_time
+        # Holds an incomplete (not yet newline-terminated) frame between reads, so
+        # a message split across read timeouts is reassembled rather than parsed
+        # as two broken lines.
+        self._rx_buffer = b""
         # Unsolicited startup messages consumed during construction, kept for
         # inspection/debugging.
         self.startup_messages: List[str] = []
@@ -104,11 +108,20 @@ class XPeel:
     # -- low-level I/O -----------------------------------------------------
 
     def _read_message(self) -> str:
-        """Read one framed line, stripped; "" if nothing arrived before timeout."""
-        raw = self._conn.read_until(protocol.READ_TERMINATOR)
-        if not raw:
-            return ""
-        return raw.decode(protocol.ENCODING, errors="replace").strip()
+        """Read one complete framed line, stripped.
+
+        A single read may time out mid-message and return a partial fragment
+        (bytes not ending in the terminator). Such fragments are retained in a
+        buffer and completed on later calls, so a line split across reads is
+        reassembled instead of being parsed as two broken lines. Returns ``""``
+        when no complete line is available yet.
+        """
+        self._rx_buffer += self._conn.read_until(protocol.READ_TERMINATOR)
+        if not self._rx_buffer.endswith(protocol.READ_TERMINATOR):
+            return ""  # still mid-frame; keep the partial for the next read
+        line = self._rx_buffer
+        self._rx_buffer = b""
+        return line.decode(protocol.ENCODING, errors="replace").strip()
 
     def _drain_unsolicited(self) -> None:
         """Consume any unsolicited messages already on the line before commands.
@@ -145,19 +158,32 @@ class XPeel:
         Raises :class:`XPeelAckTimeoutError` if an ``*ack`` was seen but no
         ``*ready`` followed in time, and :class:`XPeelTimeoutError` if nothing
         usable arrived at all.
+
+        Unsolicited messages that appear mid-session (a human pressing the
+        front-panel button, or a power-up/restart broadcast) are skipped, and the
+        ``*ready`` that terminates such a sequence is not mistaken for ours.
         """
         self._conn.write(protocol.build_command(body))
         deadline = time.monotonic() + ready_timeout
         data_lines: List[str] = []
         saw_ack = False
+        pending_unsolicited_ready = False
         while time.monotonic() < deadline:
             line = self._read_message()
             if not line:
                 continue
             if protocol.is_ready(line):
+                if pending_unsolicited_ready:
+                    # Terminal *ready of an unsolicited op, not our command's.
+                    pending_unsolicited_ready = False
+                    continue
                 return data_lines, line
             if protocol.is_ack(line):
                 saw_ack = True
+                continue
+            if protocol.is_unsolicited(line):
+                if protocol.starts_unsolicited_ready(line):
+                    pending_unsolicited_ready = True
                 continue
             data_lines.append(line)
         if saw_ack:

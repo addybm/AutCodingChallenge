@@ -25,7 +25,18 @@ class Delay:
     seconds: float
 
 
-ScriptItem = Union[str, Delay]
+@dataclass
+class Raw:
+    """Raw bytes returned by a single ``read_until`` call, verbatim.
+
+    Used to model a fragmented read: a partial line (no terminator) that a real
+    serial timeout would hand back before the rest of the message arrives.
+    """
+
+    data: bytes
+
+
+ScriptItem = Union[str, Delay, Raw]
 
 
 # Short, injected timeouts so the suite runs fast while still driving the real
@@ -104,6 +115,8 @@ class FakeSerial:
             if isinstance(item, Delay):
                 self._pending_delay = item.seconds
                 continue
+            if isinstance(item, Raw):
+                return item.data
             line = item if item.endswith("\r\n") else item + "\r\n"
             return line.encode("ascii")
 

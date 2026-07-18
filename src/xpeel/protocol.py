@@ -107,3 +107,33 @@ def parse_ready(line: str) -> Tuple[int, int, int]:
 def describe_error_code(code: int) -> str:
     """Human-readable description for an error code, tolerant of unknown codes."""
     return ERROR_CODES.get(code, f"Unknown error code {code:02d}")
+
+
+# Messages the device emits on its own, unprompted (manual p.51-52): the
+# power-up/restart broadcast and front-panel ("manual") operation notices.
+_UNSOLICITED_PREFIXES = ("*manual", "*setup", "*poweron", "*homing")
+# These begin an unsolicited sequence that ends in its *own* ``*ready``.
+_UNSOLICITED_READY_STARTS = ("*manual", "*poweron", "*homing")
+
+
+def is_unsolicited(line: str) -> bool:
+    """True for a message the device sends on its own, not as a command reply.
+
+    Covers the front-panel notices (``*manual``/``*setup`` and the bare
+    ``*xpeel`` that follows a manual button press -- note: no ``:AB``) and the
+    power-up/restart broadcast (``*poweron``/``*homing``).
+    """
+    text = normalize(line)
+    if text == "*xpeel":  # bare, no ":AB" -> a manual-op notice, not our command
+        return True
+    return text.startswith(_UNSOLICITED_PREFIXES)
+
+
+def starts_unsolicited_ready(line: str) -> bool:
+    """True if this line begins an unsolicited sequence terminated by ``*ready``.
+
+    A front-panel action and the power-up/restart broadcast each end with their
+    own ``*ready``; seeing one of these means the *next* ``*ready`` belongs to
+    that sequence, not to a command we issued.
+    """
+    return normalize(line).startswith(_UNSOLICITED_READY_STARTS)
