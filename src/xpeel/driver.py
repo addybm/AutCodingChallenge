@@ -97,6 +97,28 @@ class XPeel:
 
     # -- public commands ---------------------------------------------------
 
-    def peel(self) -> str:
-        """Trigger a peel cycle and block until the plate has been peeled."""
-        return self._run_command("xpeel:41", ready_timeout=PEEL_TIMEOUT)
+    def peel(self, param_set: int = 4, adhere_time: int = 1) -> str:
+        """Trigger a peel cycle and block until the plate has been peeled.
+
+        Args:
+            param_set: ``A`` in ``*xpeel:AB`` -- the parameter set (1-9)
+                selecting begin-peel location and speed.
+            adhere_time: ``B`` in ``*xpeel:AB`` -- the adhere-time code
+                (1=2.5s, 2=5s, 3=7.5s, 4=10s).
+
+        Defaults produce ``*xpeel:41``. Raises ``ValueError`` for out-of-range
+        parameters.
+        """
+        if param_set not in protocol.PARAM_SETS:
+            raise ValueError(
+                f"param_set must be in {protocol.PARAM_SETS.start}-"
+                f"{protocol.PARAM_SETS.stop - 1}, got {param_set!r}."
+            )
+        if adhere_time not in protocol.ADHERE_TIMES:
+            raise ValueError(
+                f"adhere_time must be one of {sorted(protocol.ADHERE_TIMES)}, "
+                f"got {adhere_time!r}."
+            )
+        return self._run_command(
+            f"xpeel:{param_set}{adhere_time}", ready_timeout=PEEL_TIMEOUT
+        )
