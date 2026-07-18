@@ -26,6 +26,11 @@ PEEL_TIMEOUT = 60.0
 # Quick queries that involve no mechanism motion (e.g. tape remaining).
 QUERY_TIMEOUT = 5.0
 
+# Init drain: stop once the line has been quiet this long, bounded by an overall
+# cap so a chatty/misbehaving device cannot block construction indefinitely.
+DRAIN_IDLE_TIMEOUT = 0.5
+DRAIN_MAX_TIME = 5.0
+
 
 class XPeel:
     """Driver for a single XPeel instrument over RS-232.
@@ -45,14 +50,20 @@ class XPeel:
         connection: Optional[object] = None,
         baudrate: int = DEFAULT_BAUDRATE,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
+        drain_on_init: bool = True,
     ) -> None:
         if connection is None and port is None:
             raise ValueError("Provide either a 'port' to open or a 'connection'.")
         self._read_timeout = read_timeout
+        # Unsolicited startup messages consumed during construction, kept for
+        # inspection/debugging.
+        self.startup_messages: List[str] = []
         if connection is not None:
             self._conn = connection
         else:
             self._conn = self._open(port, baudrate, read_timeout)
+        if drain_on_init:
+            self._drain_unsolicited()
 
     @staticmethod
     def _open(port: str, baudrate: int, read_timeout: float):
@@ -83,6 +94,28 @@ class XPeel:
         if not raw:
             return ""
         return raw.decode(protocol.ENCODING, errors="replace").strip()
+
+    def _drain_unsolicited(self) -> None:
+        """Consume any unsolicited messages already on the line before commands.
+
+        On power-up the device broadcasts ``*poweron``/``*homing``/``*ready``;
+        a device that has been idle sends nothing. We read and discard whatever
+        is present until either a terminal ``*ready`` is seen or the line has
+        been quiet for ``DRAIN_IDLE_TIMEOUT``, bounded by ``DRAIN_MAX_TIME``.
+        """
+        hard_deadline = time.monotonic() + DRAIN_MAX_TIME
+        last_activity = time.monotonic()
+        while time.monotonic() < hard_deadline:
+            line = self._read_message()
+            if line:
+                self.startup_messages.append(line)
+                last_activity = time.monotonic()
+                # The startup broadcast ends with *ready -> line is now idle.
+                if protocol.is_ready(line):
+                    return
+                continue
+            if time.monotonic() - last_activity >= DRAIN_IDLE_TIMEOUT:
+                return
 
     def _run_command(
         self, body: str, ready_timeout: float
