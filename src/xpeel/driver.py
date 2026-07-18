@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import serial
 
 from xpeel import protocol
-from xpeel.exceptions import XPeelConnectionError, XPeelTimeoutError
+from xpeel.exceptions import (
+    XPeelConnectionError,
+    XPeelProtocolError,
+    XPeelTimeoutError,
+)
 
 DEFAULT_BAUDRATE = 9600
 
@@ -18,6 +22,9 @@ DEFAULT_READ_TIMEOUT = 0.2
 
 # Generous headroom for a full cycle (up to 10s adhere plus mechanism motion).
 PEEL_TIMEOUT = 60.0
+
+# Quick queries that involve no mechanism motion (e.g. tape remaining).
+QUERY_TIMEOUT = 5.0
 
 
 class XPeel:
@@ -77,20 +84,28 @@ class XPeel:
             return ""
         return raw.decode(protocol.ENCODING, errors="replace").strip()
 
-    def _run_command(self, body: str, ready_timeout: float) -> str:
+    def _run_command(
+        self, body: str, ready_timeout: float
+    ) -> Tuple[List[str], str]:
         """Send a command and block until the terminal ``*ready`` response.
 
-        Intermediate lines (notably ``*ack``) are skipped; only ``*ready`` ends
-        the wait. Raises :class:`XPeelTimeoutError` on no ``*ready`` in time.
+        Returns ``(data_lines, ready_line)`` where ``data_lines`` are any
+        intermediate payload lines (e.g. ``*tape:...``) received before ready;
+        ``*ack`` is treated as a receipt only. Raises
+        :class:`XPeelTimeoutError` if no ``*ready`` arrives in time.
         """
         self._conn.write(protocol.build_command(body))
         deadline = time.monotonic() + ready_timeout
+        data_lines: List[str] = []
         while time.monotonic() < deadline:
             line = self._read_message()
             if not line:
                 continue
             if protocol.is_ready(line):
-                return line
+                return data_lines, line
+            if protocol.is_ack(line):
+                continue
+            data_lines.append(line)
         raise XPeelTimeoutError(
             f"No *ready response for command '*{body}' within {ready_timeout}s."
         )
@@ -119,6 +134,22 @@ class XPeel:
                 f"adhere_time must be one of {sorted(protocol.ADHERE_TIMES)}, "
                 f"got {adhere_time!r}."
             )
-        return self._run_command(
+        _, ready = self._run_command(
             f"xpeel:{param_set}{adhere_time}", ready_timeout=PEEL_TIMEOUT
+        )
+        return ready
+
+    def tape_left(self) -> Tuple[Optional[int], Optional[int]]:
+        """Report remaining tape as (supply, take-up) counts in *deseals*.
+
+        ``supply`` is the peel operations left on the supply spool; ``take-up``
+        is the room left on the collection spool. Returns ``(None, None)`` when
+        the device reports the unknown state (``99,99``, before the first peel).
+        """
+        data_lines, _ = self._run_command("tapeleft", ready_timeout=QUERY_TIMEOUT)
+        for line in data_lines:
+            if protocol.is_tape(line):
+                return protocol.parse_tape(line)
+        raise XPeelProtocolError(
+            f"No *tape response received; got {data_lines!r}."
         )
